@@ -29,33 +29,30 @@ async function fetchJson(url, options = {}) {
   return response.data;
 }
 
+const DEFAULT_REFERENCE_LOCATION = { latitude: 17.4474, longitude: 78.3911 };
+
 function useDemoCoordinates() {
-  const [manualLocation, setManualLocation] = useState({ latitude: 17.4474, longitude: 78.3911, source: 'manual' });
-  const [location, setLocation] = useState({ latitude: 17.4474, longitude: 78.3911, permission: 'reading' });
+  const [manualLocation, setManualLocation] = useState({ ...DEFAULT_REFERENCE_LOCATION, source: 'manual' });
+  const [location, setLocation] = useState({ ...DEFAULT_REFERENCE_LOCATION, permission: 'demo-reference' });
 
   useEffect(() => {
     if (!navigator.geolocation) {
-      setLocation({ latitude: 17.4474, longitude: 78.3911, permission: 'unsupported' });
+      setLocation({ ...DEFAULT_REFERENCE_LOCATION, permission: 'unsupported' });
       return;
     }
 
     navigator.geolocation.getCurrentPosition(
-      (position) => {
-        setLocation({
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          permission: 'granted',
-        });
+      () => {
+        setLocation({ ...DEFAULT_REFERENCE_LOCATION, permission: 'demo-reference' });
       },
       () => {
-        setLocation({ latitude: 17.4474, longitude: 78.3911, permission: 'denied' });
+        setLocation({ ...DEFAULT_REFERENCE_LOCATION, permission: 'denied' });
       },
       { enableHighAccuracy: true, timeout: 10000 },
     );
-  }, [setLocation]);
+  }, []);
 
-  const effectiveLocation = location.permission === 'granted' ? location : manualLocation;
-  return { ...effectiveLocation, permission: location.permission, setManualLocation };
+  return { ...manualLocation, permission: location.permission, setManualLocation };
 }
 
 function HomePage() {
@@ -140,7 +137,13 @@ function HomePage() {
           <div className="mt-4 flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
             <span>Current location</span>
             <span className="font-medium text-slate-700">
-              {location.permission === 'granted' ? 'Location shared' : location.permission === 'denied' ? 'Manual fallback active' : 'Reading GPS'}
+              {location.permission === 'granted'
+                ? 'Location shared'
+                : location.permission === 'denied'
+                  ? 'Manual fallback active'
+                  : location.permission === 'demo-reference'
+                    ? 'KPHB reference active'
+                    : 'Reading GPS'}
             </span>
           </div>
 
@@ -176,7 +179,7 @@ function HomePage() {
             <h2 className="text-lg font-semibold">Active incident</h2>
           </div>
           <div className="space-y-4 text-sm text-slate-200">
-            <p className="flex items-center justify-between"><span>Permission</span><span className="font-medium text-white">{location.permission}</span></p>
+            <p className="flex items-center justify-between"><span>Permission</span><span className="font-medium text-white">{location.permission === 'demo-reference' ? 'KPHB reference' : location.permission}</span></p>
             <p className="flex items-center justify-between"><span>Latitude</span><span>{location.latitude.toFixed(4)}</span></p>
             <p className="flex items-center justify-between"><span>Longitude</span><span>{location.longitude.toFixed(4)}</span></p>
             <p className="rounded-2xl border border-slate-700 bg-slate-800 p-3 text-slate-200">

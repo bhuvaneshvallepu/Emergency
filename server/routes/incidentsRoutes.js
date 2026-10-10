@@ -2,7 +2,7 @@ import express from 'express';
 import { demoStore } from '../data/store.js';
 import { authenticate } from '../middleware/auth.js';
 import { classifyIncident } from '../services/aiService.js';
-import { createAlertWorkflow, createIncidentTimelineEntry } from '../services/notificationService.js';
+import { broadcastIncidentUpdate, createAlertWorkflow, createIncidentTimelineEntry } from '../services/notificationService.js';
 
 const router = express.Router();
 const idempotencyKeys = new Map();
@@ -57,6 +57,7 @@ router.post('/', async (req, res) => {
   idempotencyKeys.set(idempotencyKey || incident.id, incident);
   demoStore.incidents.unshift(incident);
   createIncidentTimelineEntry(incident.id, 'sos_created', { source, category });
+  broadcastIncidentUpdate(incident.id, 'incident-created', { incident });
 
   const primaryContact = demoStore.contacts.find((contact) => contact.userId === req.user.id && contact.priority === 1) || demoStore.contacts.find((contact) => contact.userId === req.user.id);
   if (primaryContact) {
@@ -76,6 +77,7 @@ router.post('/', async (req, res) => {
         urgency: incident.urgencyEstimate,
         requiresHumanConfirmation: classification.requiresHumanConfirmation,
       });
+      broadcastIncidentUpdate(incident.id, 'incident-classified', { incident, classification });
       return classification;
     })
     .catch(() => null);
@@ -127,6 +129,7 @@ router.post('/:id/acknowledge', (req, res) => {
   alert.status = 'acknowledged';
   alert.acknowledgedAt = new Date().toISOString();
   createIncidentTimelineEntry(incident.id, 'acknowledged', { contactId: alert.contactId });
+  broadcastIncidentUpdate(incident.id, 'alert-acknowledged', { alertId: alert.id, contactId: alert.contactId, status: alert.status });
   return res.json({ alert, message: 'Alert acknowledged.' });
 });
 
@@ -138,6 +141,7 @@ router.post('/:id/resolve', (req, res) => {
   incident.resolvedAt = new Date().toISOString();
   incident.updatedAt = new Date().toISOString();
   createIncidentTimelineEntry(incident.id, 'resolved', { status: 'resolved' });
+  broadcastIncidentUpdate(incident.id, 'incident-resolved', { incident });
   return res.json({ incident });
 });
 
@@ -148,6 +152,7 @@ router.post('/:id/cancel', (req, res) => {
   incident.status = 'cancelled';
   incident.updatedAt = new Date().toISOString();
   createIncidentTimelineEntry(incident.id, 'cancelled', { status: 'cancelled' });
+  broadcastIncidentUpdate(incident.id, 'incident-cancelled', { incident });
   return res.json({ incident });
 });
 

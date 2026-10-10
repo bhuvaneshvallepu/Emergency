@@ -30,3 +30,15 @@ test('service lookup returns explicit demo status when no provider key is config
   assert.ok(Array.isArray(result.facilities));
   if (original) process.env.PLACES_API_KEY = original;
 });
+
+test('demo reference data stays anchored to KPHB Hyderabad service names', async () => {
+  const original = process.env.PLACES_API_KEY;
+  delete process.env.PLACES_API_KEY;
+  const result = await findNearbyServices({ lat: 17.4474, lng: 78.3911, category: 'all' });
+
+  assert.ok(result.facilities.some((item) => /KPHB Colony Multi-Speciality Hospital/i.test(item.name)));
+  assert.ok(result.facilities.some((item) => /KPHB Police Station/i.test(item.name)));
+  assert.ok(result.facilities.some((item) => /KPHB Fire Station/i.test(item.name)));
+
+  if (original) process.env.PLACES_API_KEY = original;
+});

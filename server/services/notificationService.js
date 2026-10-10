@@ -1,5 +1,26 @@
 import { demoStore } from '../data/store.js';
 
+let socketServer = null;
+
+export function setSocketServer(server) {
+  socketServer = server;
+}
+
+function roomName(incidentId) {
+  return `incident-${incidentId}`;
+}
+
+export function broadcastIncidentUpdate(incidentId, eventType, payload = {}) {
+  if (!socketServer || !incidentId) return;
+
+  socketServer.to(roomName(incidentId)).emit('incident-update', {
+    incidentId,
+    eventType,
+    timestamp: new Date().toISOString(),
+    ...payload,
+  });
+}
+
 export function createAlertWorkflow(incident, contact) {
   const alert = {
     id: `alert-${Date.now()}`,
@@ -17,15 +38,18 @@ export function createAlertWorkflow(incident, contact) {
   };
 
   demoStore.alertEvents.push(alert);
+  broadcastIncidentUpdate(incident.id, 'alert-queued', { alertId: alert.id, contactId: contact.id, status: alert.status });
 
   setTimeout(() => {
     alert.status = 'sent';
     alert.sentAt = new Date().toISOString();
+    broadcastIncidentUpdate(incident.id, 'alert-sent', { alertId: alert.id, contactId: alert.contactId, status: alert.status });
   }, 1200);
 
   setTimeout(() => {
     alert.status = 'delivered';
     alert.deliveredAt = new Date().toISOString();
+    broadcastIncidentUpdate(incident.id, 'alert-delivered', { alertId: alert.id, contactId: alert.contactId, status: alert.status });
   }, 2400);
 
   return alert;
@@ -41,5 +65,6 @@ export function createIncidentTimelineEntry(incidentId, eventType, metadata = {}
   };
 
   demoStore.timeline.push(entry);
+  broadcastIncidentUpdate(incidentId, `timeline-${eventType}`, { entry });
   return entry;
 }
