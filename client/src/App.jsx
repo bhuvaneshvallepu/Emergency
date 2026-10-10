@@ -1084,6 +1084,18 @@ function AuthPage() {
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [status, setStatus] = useState('Checking sign-in status…');
 
+  const logAuthResponseShape = (responseStatus, data) => {
+    const payload = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+    const profile = payload.user && typeof payload.user === 'object' && !Array.isArray(payload.user)
+      ? payload.user
+      : {};
+    console.info('[auth] response shape', {
+      status: responseStatus,
+      keys: Object.keys(payload),
+      userKeys: Object.keys(profile),
+    });
+  };
+
   useEffect(() => {
     const controller = new AbortController();
     fetchJson('/auth/me', { signal: controller.signal })
@@ -1112,6 +1124,7 @@ function AuthPage() {
       const endpoint = mode === 'register' ? '/auth/register' : '/auth/login';
       const payload = mode === 'register' ? form : { email: form.email, password: form.password };
       const response = await API.post(endpoint, payload);
+      logAuthResponseShape(response.status, response.data);
       const auth = readAuthResponse(response.data);
       if (!auth) {
         localStorage.removeItem('safesphere-token');
@@ -1123,6 +1136,9 @@ function AuthPage() {
       setUser(auth.user);
       setStatus(`Signed in as ${auth.user.name}.`);
     } catch (error) {
+      if (error.response) {
+        logAuthResponseShape(error.response.status, error.response.data);
+      }
       setStatus(error.response?.data?.message || 'Unable to sign in. Check your details and connection.');
     }
   };
