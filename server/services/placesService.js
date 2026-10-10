@@ -1,39 +1,38 @@
 import axios from 'axios';
 
+const validCategories = new Set(['hospital', 'police', 'fire', 'all']);
+
 const demoFacilities = [
   {
     id: 'facility-1',
-    name: 'Mercy General Hospital',
+    name: 'KPHB Colony Multi-Speciality Hospital',
     category: 'hospital',
-    latitude: 40.715,
-    longitude: -74.009,
-    address: '24 Willow Ave, New York, NY',
-    phone: '+1-212-555-1000',
-    distanceKm: 0.7,
+    latitude: 17.4474,
+    longitude: 78.3911,
+    address: 'KPHB Colony, Hyderabad, Telangana, India',
+    phone: 'Not available in demo mode',
     verified: false,
     demo: true,
   },
   {
     id: 'facility-2',
-    name: 'City Police Precinct 8',
+    name: 'KPHB Police Station',
     category: 'police',
-    latitude: 40.713,
-    longitude: -74.002,
-    address: '142 East 8th St, New York, NY',
-    phone: '+1-212-555-3100',
-    distanceKm: 1.1,
+    latitude: 17.4485,
+    longitude: 78.3928,
+    address: 'Near KPHB Main Road, Hyderabad, Telangana, India',
+    phone: 'Not available in demo mode',
     verified: false,
     demo: true,
   },
   {
     id: 'facility-3',
-    name: 'Harbor Fire Station 5',
+    name: 'KPHB Fire Station',
     category: 'fire',
-    latitude: 40.718,
-    longitude: -74.015,
-    address: '88 River Street, New York, NY',
-    phone: '+1-212-555-4200',
-    distanceKm: 1.4,
+    latitude: 17.4453,
+    longitude: 78.3895,
+    address: 'KPHB Phase 1, Hyderabad, Telangana, India',
+    phone: 'Not available in demo mode',
     verified: false,
     demo: true,
   },
@@ -53,25 +52,34 @@ function calculateDistanceKm(lat1, lng1, lat2, lng2) {
   return earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
+function normalizeCategory(category) {
+  const current = String(category || 'hospital').trim().toLowerCase();
+  return validCategories.has(current) ? current : 'hospital';
+}
+
 export async function findNearbyServices({ lat, lng, category = 'hospital' }) {
-  if (!lat || !lng) {
-    throw new Error('Location coordinates are required.');
+  const normalizedLat = Number(lat);
+  const normalizedLng = Number(lng);
+  const normalizedCategory = normalizeCategory(category);
+
+  if (!Number.isFinite(normalizedLat) || !Number.isFinite(normalizedLng) || normalizedLat < -90 || normalizedLat > 90 || normalizedLng < -180 || normalizedLng > 180) {
+    throw new Error('Latitude and longitude must be valid geographic coordinates.');
   }
 
   const apiKey = process.env.PLACES_API_KEY;
 
   if (!apiKey) {
     const facilities = demoFacilities
-      .filter((facility) => facility.category === category || category === 'all')
+      .filter((facility) => normalizedCategory === 'all' || facility.category === normalizedCategory)
       .map((facility) => ({
         ...facility,
-        distanceKm: Number(calculateDistanceKm(lat, lng, facility.latitude, facility.longitude).toFixed(2)),
+        distanceKm: Number(calculateDistanceKm(normalizedLat, normalizedLng, facility.latitude, facility.longitude).toFixed(2)),
       }))
       .sort((a, b) => a.distanceKm - b.distanceKm);
 
     return {
       mode: 'demo',
-      label: 'Demo data – not live verified service data',
+      label: 'Demo data — not live verified service data',
       facilities,
     };
   }
@@ -79,9 +87,9 @@ export async function findNearbyServices({ lat, lng, category = 'hospital' }) {
   try {
     const response = await axios.get('https://maps.googleapis.com/maps/api/place/nearbysearch/json', {
       params: {
-        location: `${lat},${lng}`,
+        location: `${normalizedLat},${normalizedLng}`,
         radius: 5000,
-        type: category,
+        type: normalizedCategory === 'all' ? 'hospital' : normalizedCategory,
         key: apiKey,
       },
     });
@@ -92,24 +100,25 @@ export async function findNearbyServices({ lat, lng, category = 'hospital' }) {
       facilities: (response.data.results || []).slice(0, 10).map((item) => ({
         id: item.place_id,
         name: item.name,
-        category,
+        category: normalizedCategory,
         latitude: item.geometry?.location?.lat,
         longitude: item.geometry?.location?.lng,
-        address: item.vicinity,
-        phone: item.formatted_phone_number || 'Not available',
-        distanceKm: Number(calculateDistanceKm(lat, lng, item.geometry?.location?.lat, item.geometry?.location?.lng).toFixed(2)),
-        verified: !!item.business_status,
+        address: item.vicinity || 'Address unavailable',
+        phone: item.formatted_phone_number || 'Not available from provider',
+        distanceKm: Number(calculateDistanceKm(normalizedLat, normalizedLng, item.geometry?.location?.lat, item.geometry?.location?.lng).toFixed(2)),
+        verified: Boolean(item.business_status),
+        demo: false,
       })),
     };
   } catch (error) {
     return {
       mode: 'demo',
-      label: 'Provider unavailable – using demo mode fallback',
+      label: 'Provider unavailable — using demo fallback',
       facilities: demoFacilities
-        .filter((facility) => facility.category === category || category === 'all')
+        .filter((facility) => normalizedCategory === 'all' || facility.category === normalizedCategory)
         .map((facility) => ({
           ...facility,
-          distanceKm: Number(calculateDistanceKm(lat, lng, facility.latitude, facility.longitude).toFixed(2)),
+          distanceKm: Number(calculateDistanceKm(normalizedLat, normalizedLng, facility.latitude, facility.longitude).toFixed(2)),
         })),
     };
   }

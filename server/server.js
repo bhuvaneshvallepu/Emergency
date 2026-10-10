@@ -22,6 +22,10 @@ const rootDir = path.resolve(__dirname, '..');
 
 dotenv.config({ path: path.resolve(rootDir, '.env') });
 
+if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
+  throw new Error('JWT_SECRET must be set to a strong value in production.');
+}
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {

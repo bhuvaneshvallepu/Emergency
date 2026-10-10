@@ -7,6 +7,7 @@ export const demoStore = {
     preferredLanguage: 'en',
     medicalNotes: 'Asthma medication in backpack.',
     consent: { locationSharing: true, medicalSharing: false },
+    passwordHash: '$2b$10$GstmdhnSbFpLqcHPd6nX8.i0ZC/E4oQ97B5GCF0DVZYrjTBmvTsD6',
   },
   contacts: [
     {
@@ -39,7 +40,7 @@ export const demoStore = {
       source: 'manual_sos',
       urgencyEstimate: 'critical',
       aiSummary: 'Critical medical incident reported near downtown. Immediate support is recommended.',
-      location: { latitude: 40.7128, longitude: -74.006, capturedAt: new Date().toISOString() },
+      location: { latitude: 17.4474, longitude: 78.3911, capturedAt: new Date().toISOString() },
       status: 'active',
       recommendedActions: ['Call emergency services', 'Keep the airway clear', 'Share exact location'],
       createdAt: new Date().toISOString(),

@@ -30,11 +30,12 @@ async function fetchJson(url, options = {}) {
 }
 
 function useDemoCoordinates() {
-  const [location, setLocation] = useState({ latitude: 40.7128, longitude: -74.006, permission: 'demo' });
+  const [manualLocation, setManualLocation] = useState({ latitude: 17.4474, longitude: 78.3911, source: 'manual' });
+  const [location, setLocation] = useState({ latitude: 17.4474, longitude: 78.3911, permission: 'reading' });
 
   useEffect(() => {
     if (!navigator.geolocation) {
-      setLocation({ latitude: 40.7128, longitude: -74.006, permission: 'unsupported' });
+      setLocation({ latitude: 17.4474, longitude: 78.3911, permission: 'unsupported' });
       return;
     }
 
@@ -47,13 +48,14 @@ function useDemoCoordinates() {
         });
       },
       () => {
-        setLocation({ latitude: 40.7128, longitude: -74.006, permission: 'denied' });
+        setLocation({ latitude: 17.4474, longitude: 78.3911, permission: 'denied' });
       },
       { enableHighAccuracy: true, timeout: 10000 },
     );
   }, [setLocation]);
 
-  return location;
+  const effectiveLocation = location.permission === 'granted' ? location : manualLocation;
+  return { ...effectiveLocation, permission: location.permission, setManualLocation };
 }
 
 function HomePage() {
@@ -138,9 +140,28 @@ function HomePage() {
           <div className="mt-4 flex items-center justify-between rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm">
             <span>Current location</span>
             <span className="font-medium text-slate-700">
-              {location.permission === 'granted' ? 'Location shared' : 'Demo location active'}
+              {location.permission === 'granted' ? 'Location shared' : location.permission === 'denied' ? 'Manual fallback active' : 'Reading GPS'}
             </span>
           </div>
+
+          {location.permission !== 'granted' ? (
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <input
+                type="number"
+                value={location.latitude}
+                onChange={(event) => location.setManualLocation((prev) => ({ ...prev, latitude: Number(event.target.value) }))}
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                placeholder="Latitude"
+              />
+              <input
+                type="number"
+                value={location.longitude}
+                onChange={(event) => location.setManualLocation((prev) => ({ ...prev, longitude: Number(event.target.value) }))}
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm"
+                placeholder="Longitude"
+              />
+            </div>
+          ) : null}
 
           {incident ? (
             <div className="mt-5 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-800">
@@ -639,3 +660,4 @@ export default function App() {
     </BrowserRouter>
   );
 }
+

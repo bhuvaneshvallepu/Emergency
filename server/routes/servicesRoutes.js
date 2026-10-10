@@ -16,7 +16,8 @@ router.get('/nearby', async (req, res) => {
     const results = await findNearbyServices({ lat: Number(lat), lng: Number(lng), category });
     return res.json(results);
   } catch (error) {
-    return res.status(500).json({ message: 'Unable to fetch nearby services right now.' });
+    const message = error instanceof Error ? error.message : 'Unable to fetch nearby services right now.';
+    return res.status(/Latitude and longitude/.test(message) ? 400 : 500).json({ message });
   }
 });
 
@@ -25,9 +26,9 @@ router.get('/:id', (req, res) => {
     id: req.params.id,
     name: 'Demo facility',
     category: 'hospital',
-    latitude: 40.7128,
-    longitude: -74.006,
-    address: 'Demo address',
+    latitude: 17.4474,
+    longitude: 78.3911,
+    address: 'KPHB, Hyderabad, India',
     phone: '+1-000-000-0000',
     demo: true,
   });

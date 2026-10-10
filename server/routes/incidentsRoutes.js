@@ -5,44 +5,58 @@ import { classifyIncident } from '../services/aiService.js';
 import { createAlertWorkflow, createIncidentTimelineEntry } from '../services/notificationService.js';
 
 const router = express.Router();
+const idempotencyKeys = new Map();
+
+function validCoordinates(latitude, longitude) {
+  const lat = Number(latitude);
+  const lng = Number(longitude);
+  if (Number.isNaN(lat) || Number.isNaN(lng)) return false;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return false;
+  return true;
+}
+
 router.use(authenticate);
 
 router.post('/', async (req, res) => {
-  const { description, category = 'other', latitude, longitude, source = 'user_report' } = req.body || {};
+  const { description, category = 'other', latitude, longitude, source = 'manual_sos' } = req.body || {};
+  const idempotencyKey = req.headers['x-idempotency-key'];
 
-  if (!description) {
-    return res.status(400).json({ message: 'Incident description is required.' });
+  if (!description || String(description).trim().length < 5) {
+    return res.status(400).json({ message: 'An incident description is required.' });
   }
 
-  const classification = await classifyIncident(description, { category, latitude, longitude });
+  if (latitude !== undefined && longitude !== undefined && !validCoordinates(latitude, longitude)) {
+    return res.status(400).json({ message: 'Latitude and longitude must be valid geographic coordinates.' });
+  }
+
+  if (idempotencyKey && idempotencyKeys.has(idempotencyKey)) {
+    const duplicate = idempotencyKeys.get(idempotencyKey);
+    return res.status(200).json({ incident: duplicate, classification: null, duplicate: true });
+  }
+
   const incident = {
     id: `incident-${Date.now()}`,
     userId: req.user.id,
-    category: classification.category || category,
-    description,
+    category,
+    description: description.trim(),
     source,
-    urgencyEstimate: classification.urgency,
-    aiSummary: classification.summary,
+    urgencyEstimate: 'unknown',
+    aiSummary: 'Manual SOS created and notification workflow started without waiting for AI classification.',
     location: {
-      latitude: latitude || 40.7128,
-      longitude: longitude || -74.006,
+      latitude: validCoordinates(latitude, longitude) ? Number(latitude) : 0,
+      longitude: validCoordinates(latitude, longitude) ? Number(longitude) : 0,
       capturedAt: new Date().toISOString(),
     },
     status: 'active',
-    recommendedActions: classification.recommendedActions || ['Call emergency services'],
+    recommendedActions: ['Contact emergency services if immediate intervention is needed', 'Share your location with a trusted contact', 'Keep yourself in a safe place if possible'],
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     resolvedAt: null,
   };
 
+  idempotencyKeys.set(idempotencyKey || incident.id, incident);
   demoStore.incidents.unshift(incident);
-  demoStore.timeline.unshift({
-    id: `timeline-${Date.now()}`,
-    incidentId: incident.id,
-    eventType: 'created',
-    timestamp: new Date().toISOString(),
-    sanitizedMetadata: { source },
-  });
+  createIncidentTimelineEntry(incident.id, 'sos_created', { source, category });
 
   const primaryContact = demoStore.contacts.find((contact) => contact.userId === req.user.id && contact.priority === 1) || demoStore.contacts.find((contact) => contact.userId === req.user.id);
   if (primaryContact) {
@@ -50,7 +64,24 @@ router.post('/', async (req, res) => {
     createIncidentTimelineEntry(incident.id, 'alert_sent', { contactId: primaryContact.id, status: alert.status });
   }
 
-  return res.status(201).json({ incident, classification });
+  const classificationPromise = classifyIncident(incident.description, { category, latitude: incident.location.latitude, longitude: incident.location.longitude })
+    .then((classification) => {
+      incident.category = classification.category || incident.category;
+      incident.aiSummary = classification.summary;
+      incident.urgencyEstimate = classification.urgency;
+      incident.recommendedActions = classification.recommendedActions || incident.recommendedActions;
+      incident.updatedAt = new Date().toISOString();
+      createIncidentTimelineEntry(incident.id, 'classified', {
+        category: incident.category,
+        urgency: incident.urgencyEstimate,
+        requiresHumanConfirmation: classification.requiresHumanConfirmation,
+      });
+      return classification;
+    })
+    .catch(() => null);
+
+  const classification = await classificationPromise;
+  return res.status(201).json({ incident, classification, duplicate: false });
 });
 
 router.get('/', (req, res) => {
@@ -72,6 +103,7 @@ router.post('/:id/classify', async (req, res) => {
   incident.aiSummary = classification.summary;
   incident.urgencyEstimate = classification.urgency;
   incident.recommendedActions = classification.recommendedActions;
+  incident.updatedAt = new Date().toISOString();
   return res.json({ classification });
 });
 
@@ -94,6 +126,7 @@ router.post('/:id/acknowledge', (req, res) => {
 
   alert.status = 'acknowledged';
   alert.acknowledgedAt = new Date().toISOString();
+  createIncidentTimelineEntry(incident.id, 'acknowledged', { contactId: alert.contactId });
   return res.json({ alert, message: 'Alert acknowledged.' });
 });
 
@@ -104,6 +137,7 @@ router.post('/:id/resolve', (req, res) => {
   incident.status = 'resolved';
   incident.resolvedAt = new Date().toISOString();
   incident.updatedAt = new Date().toISOString();
+  createIncidentTimelineEntry(incident.id, 'resolved', { status: 'resolved' });
   return res.json({ incident });
 });
 
@@ -113,6 +147,7 @@ router.post('/:id/cancel', (req, res) => {
 
   incident.status = 'cancelled';
   incident.updatedAt = new Date().toISOString();
+  createIncidentTimelineEntry(incident.id, 'cancelled', { status: 'cancelled' });
   return res.json({ incident });
 });
 
