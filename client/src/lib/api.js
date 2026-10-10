@@ -1,6 +1,9 @@
 import axios from 'axios';
 
-export const API = axios.create({ baseURL: '/api/v1' });
+const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
+export const API = axios.create({
+  baseURL: configuredApiBaseUrl || '/api/v1',
+});
 
 export function getAuthHeader() {
   const token = localStorage.getItem('safesphere-token') || 'demo-token';

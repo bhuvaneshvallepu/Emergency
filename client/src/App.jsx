@@ -1,6 +1,5 @@
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { BrowserRouter, NavLink, Route, Routes } from 'react-router-dom';
-import axios from 'axios';
 import { io } from 'socket.io-client';
 import {
   AlertTriangle,
@@ -18,23 +17,14 @@ import {
   Users,
 } from 'lucide-react';
 import { useGeolocation } from './hooks/useGeolocation.js';
+import { API, fetchJson, getAuthHeader } from './lib/api.js';
+import { readAuthResponse } from './utils/authResponse.js';
 import { describeAlertStatus } from './utils/alertStatus.js';
 import 'leaflet/dist/leaflet.css';
 
 const ServiceMap = lazy(() => import('./components/ServiceMap.jsx'));
-const API = axios.create({ baseURL: '/api/v1' });
 const defaultToken = 'demo-token';
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || window.location.origin;
-
-function getAuthHeader() {
-  const token = localStorage.getItem('safesphere-token') || defaultToken;
-  return { Authorization: `Bearer ${token}` };
-}
-
-async function fetchJson(url, options = {}) {
-  const response = await API.get(url, { headers: getAuthHeader(), ...options });
-  return response.data;
-}
 
 function HomePage() {
   const location = useGeolocation();
@@ -1098,8 +1088,14 @@ function AuthPage() {
     const controller = new AbortController();
     fetchJson('/auth/me', { signal: controller.signal })
       .then((data) => {
-        setUser(data.user);
-        setStatus('');
+        const profile = data?.user;
+        if (typeof profile?.id === 'string' && typeof profile?.name === 'string' && typeof profile?.email === 'string') {
+          setUser(profile);
+          setStatus('');
+        } else {
+          setUser(null);
+          setStatus('The authentication service returned an incomplete user profile. Please sign in again.');
+        }
       })
       .catch(() => {
         if (!controller.signal.aborted) {
@@ -1113,12 +1109,19 @@ function AuthPage() {
   const submit = async (event) => {
     event.preventDefault();
     try {
-    const endpoint = mode === 'register' ? '/auth/register' : '/auth/login';
-    const payload = mode === 'register' ? form : { email: form.email, password: form.password };
-    const response = await API.post(endpoint, payload, { headers: { Authorization: `Bearer ${defaultToken}` } });
-    localStorage.setItem('safesphere-token', response.data.token || defaultToken);
-    setUser(response.data.user || null);
-    setStatus(response.data.user ? `Signed in as ${response.data.user.name}.` : 'Sign-in response did not include a user profile.');
+      const endpoint = mode === 'register' ? '/auth/register' : '/auth/login';
+      const payload = mode === 'register' ? form : { email: form.email, password: form.password };
+      const response = await API.post(endpoint, payload);
+      const auth = readAuthResponse(response.data);
+      if (!auth) {
+        localStorage.removeItem('safesphere-token');
+        setUser(null);
+        setStatus('The authentication service returned an incomplete response. Confirm the frontend API URL and that the deployed backend is up to date.');
+        return;
+      }
+      localStorage.setItem('safesphere-token', auth.token);
+      setUser(auth.user);
+      setStatus(`Signed in as ${auth.user.name}.`);
     } catch (error) {
       setStatus(error.response?.data?.message || 'Unable to sign in. Check your details and connection.');
     }
