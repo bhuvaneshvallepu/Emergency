@@ -1,31 +1,39 @@
 import express from 'express';
+import rateLimit from 'express-rate-limit';
 import { demoStore } from '../data/store.js';
 import { authenticate } from '../middleware/auth.js';
 import { classifyIncident } from '../services/aiService.js';
-import { broadcastIncidentUpdate, createAlertWorkflow, createIncidentTimelineEntry } from '../services/notificationService.js';
+import { broadcastIncidentUpdate, createAlertWorkflow, createIncidentTimelineEntry, getIncidentAlerts, getNotificationPersistenceMode } from '../services/notificationService.js';
 
 const router = express.Router();
 const idempotencyKeys = new Map();
+const sosRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
+const alertRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, max: 5, standardHeaders: true, legacyHeaders: false });
 
 function validCoordinates(latitude, longitude) {
+  if (latitude === null || longitude === null
+    || (typeof latitude === 'string' && !latitude.trim())
+    || (typeof longitude === 'string' && !longitude.trim())) return false;
   const lat = Number(latitude);
   const lng = Number(longitude);
-  if (Number.isNaN(lat) || Number.isNaN(lng)) return false;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
   if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return false;
   return true;
 }
 
 router.use(authenticate);
 
-router.post('/', async (req, res) => {
+router.post('/', sosRateLimit, (req, res) => {
   const { description, category = 'other', latitude, longitude, source = 'manual_sos' } = req.body || {};
-  const idempotencyKey = req.headers['x-idempotency-key'];
+  const requestKey = req.headers['x-idempotency-key'];
+  const idempotencyKey = requestKey ? `${req.user.id}:${requestKey}` : null;
 
   if (!description || String(description).trim().length < 5) {
     return res.status(400).json({ message: 'An incident description is required.' });
   }
 
-  if (latitude !== undefined && longitude !== undefined && !validCoordinates(latitude, longitude)) {
+  if ((latitude !== undefined) !== (longitude !== undefined)
+    || (latitude !== undefined && !validCoordinates(latitude, longitude))) {
     return res.status(400).json({ message: 'Latitude and longitude must be valid geographic coordinates.' });
   }
 
@@ -33,7 +41,6 @@ router.post('/', async (req, res) => {
     const duplicate = idempotencyKeys.get(idempotencyKey);
     return res.status(200).json({ incident: duplicate, classification: null, duplicate: true });
   }
-
   const incident = {
     id: `incident-${Date.now()}`,
     userId: req.user.id,
@@ -43,9 +50,9 @@ router.post('/', async (req, res) => {
     urgencyEstimate: 'unknown',
     aiSummary: 'Manual SOS created and notification workflow started without waiting for AI classification.',
     location: {
-      latitude: validCoordinates(latitude, longitude) ? Number(latitude) : 0,
-      longitude: validCoordinates(latitude, longitude) ? Number(longitude) : 0,
-      capturedAt: new Date().toISOString(),
+      latitude: latitude === undefined ? null : Number(latitude),
+      longitude: longitude === undefined ? null : Number(longitude),
+      capturedAt: latitude === undefined ? null : new Date().toISOString(),
     },
     status: 'active',
     recommendedActions: ['Contact emergency services if immediate intervention is needed', 'Share your location with a trusted contact', 'Keep yourself in a safe place if possible'],
@@ -54,18 +61,20 @@ router.post('/', async (req, res) => {
     resolvedAt: null,
   };
 
-  idempotencyKeys.set(idempotencyKey || incident.id, incident);
+  if (idempotencyKey) {
+    idempotencyKeys.set(idempotencyKey, incident);
+    if (idempotencyKeys.size > 10000) idempotencyKeys.delete(idempotencyKeys.keys().next().value);
+  }
   demoStore.incidents.unshift(incident);
   createIncidentTimelineEntry(incident.id, 'sos_created', { source, category });
   broadcastIncidentUpdate(incident.id, 'incident-created', { incident });
 
-  const primaryContact = demoStore.contacts.find((contact) => contact.userId === req.user.id && contact.priority === 1) || demoStore.contacts.find((contact) => contact.userId === req.user.id);
-  if (primaryContact) {
-    const alert = createAlertWorkflow(incident, primaryContact);
-    createIncidentTimelineEntry(incident.id, 'alert_sent', { contactId: primaryContact.id, status: alert.status });
-  }
+  const contacts = demoStore.contacts
+    .filter((contact) => contact.userId === req.user.id)
+    .sort((left, right) => (left.priority || 99) - (right.priority || 99));
+  const notifications = contacts.map((contact) => createAlertWorkflow(incident, contact));
 
-  const classificationPromise = classifyIncident(incident.description, { category, latitude: incident.location.latitude, longitude: incident.location.longitude })
+  void classifyIncident(incident.description, { category, latitude: incident.location.latitude, longitude: incident.location.longitude })
     .then((classification) => {
       incident.category = classification.category || incident.category;
       incident.aiSummary = classification.summary;
@@ -78,12 +87,27 @@ router.post('/', async (req, res) => {
         requiresHumanConfirmation: classification.requiresHumanConfirmation,
       });
       broadcastIncidentUpdate(incident.id, 'incident-classified', { incident, classification });
-      return classification;
     })
-    .catch(() => null);
+    .catch((error) => {
+      createIncidentTimelineEntry(incident.id, 'classification_failed', { reason: 'AI classification unavailable.' });
+      console.error('Incident classification failed:', error.name || 'classification_error');
+    });
 
-  const classification = await classificationPromise;
-  return res.status(201).json({ incident, classification, duplicate: false });
+  return res.status(201).json({
+    incident,
+    classification: null,
+    notifications: notifications.map((alert) => ({
+      id: alert.id,
+      contactId: alert.contactId,
+      channel: alert.channel,
+      status: alert.status,
+      provider: alert.provider,
+      failureReason: alert.failureReason,
+      createdAt: alert.createdAt,
+    })),
+    duplicate: false,
+    persistence: getNotificationPersistenceMode(),
+  });
 });
 
 router.get('/', (req, res) => {
@@ -109,13 +133,29 @@ router.post('/:id/classify', async (req, res) => {
   return res.json({ classification });
 });
 
-router.post('/:id/alerts', (req, res) => {
+router.post('/:id/alerts', alertRateLimit, async (req, res) => {
   const incident = demoStore.incidents.find((item) => item.id === req.params.id && item.userId === req.user.id);
   if (!incident) return res.status(404).json({ message: 'Incident not found.' });
 
   const contacts = demoStore.contacts.filter((contact) => contact.userId === req.user.id);
-  const alerts = contacts.map((contact) => createAlertWorkflow(incident, contact));
-  return res.json({ alerts });
+  const existing = await getIncidentAlerts(incident.id, req.user.id);
+  const alerts = contacts
+    .filter((contact) => !existing.some((alert) => alert.contactId === contact.id))
+    .map((contact) => createAlertWorkflow(incident, contact));
+  return res.json({
+    alerts: [...existing, ...alerts].map((alert) => ({
+      id: alert.id,
+      contactId: alert.contactId,
+      channel: alert.channel,
+      status: alert.status,
+      provider: alert.provider,
+      failureReason: alert.failureReason,
+      createdAt: alert.createdAt,
+      updatedAt: alert.updatedAt,
+      sentAt: alert.sentAt,
+      deliveredAt: alert.deliveredAt,
+    })),
+  });
 });
 
 router.post('/:id/acknowledge', (req, res) => {
@@ -157,8 +197,16 @@ router.post('/:id/cancel', (req, res) => {
 });
 
 router.get('/:id/timeline', (req, res) => {
+  const incident = demoStore.incidents.find((item) => item.id === req.params.id && item.userId === req.user.id);
+  if (!incident) return res.status(404).json({ message: 'Incident not found.' });
   const timeline = demoStore.timeline.filter((event) => event.incidentId === req.params.id);
   return res.json({ timeline });
+});
+
+router.get('/:id/alerts', async (req, res) => {
+  const incident = demoStore.incidents.find((item) => item.id === req.params.id && item.userId === req.user.id);
+  if (!incident) return res.status(404).json({ message: 'Incident not found.' });
+  return res.json({ alerts: await getIncidentAlerts(incident.id, req.user.id) });
 });
 
 export default router;

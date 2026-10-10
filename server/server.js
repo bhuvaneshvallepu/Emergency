@@ -17,6 +17,7 @@ import incidentsRoutes from './routes/incidentsRoutes.js';
 import servicesRoutes from './routes/servicesRoutes.js';
 import copilotRoutes from './routes/copilotRoutes.js';
 import journeysRoutes from './routes/journeysRoutes.js';
+import smsWebhookRoutes from './routes/smsWebhookRoutes.js';
 import { setSocketServer } from './services/notificationService.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -56,6 +57,7 @@ function canAccessIncident(user, incidentId) {
 app.use(helmet());
 app.use(cors({ origin: process.env.CLIENT_URL || 'http://localhost:5173', credentials: true }));
 app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: false, limit: '16kb' }));
 app.use(morgan('dev'));
 app.use(
   rateLimit({
@@ -71,6 +73,7 @@ app.get('/api/v1/health', (_req, res) => {
 });
 
 app.use('/api/v1/auth', authRoutes);
+app.use('/api/v1/webhooks', smsWebhookRoutes);
 app.use('/api/v1/contacts', contactsRoutes);
 app.use('/api/v1/incidents', incidentsRoutes);
 app.use('/api/v1/services', servicesRoutes);

@@ -7,6 +7,7 @@ const trustedContactSchema = new mongoose.Schema({
   email: { type: String },
   priority: { type: Number, default: 1 },
   verified: { type: Boolean, default: false },
+  smsConsent: { type: Boolean, default: false },
   notificationPreference: { type: String, default: 'sms' },
 }, { timestamps: true });
 
