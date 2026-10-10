@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { useGeolocation } from './hooks/useGeolocation.js';
 import { API, fetchJson, getAuthHeader } from './lib/api.js';
-import { readAuthResponse } from './utils/authResponse.js';
+import { getAuthResponseIssue, readAuthResponse } from './utils/authResponse.js';
 import { describeAlertStatus } from './utils/alertStatus.js';
 import 'leaflet/dist/leaflet.css';
 
@@ -1084,15 +1084,17 @@ function AuthPage() {
   const [form, setForm] = useState({ name: '', email: '', password: '' });
   const [status, setStatus] = useState('Checking sign-in status…');
 
-  const logAuthResponseShape = (responseStatus, data) => {
+  const logAuthResponseShape = (path, responseStatus, data, reason) => {
     const payload = data && typeof data === 'object' && !Array.isArray(data) ? data : {};
     const profile = payload.user && typeof payload.user === 'object' && !Array.isArray(payload.user)
       ? payload.user
       : {};
-    console.info('[auth] response shape', {
+    console.info('[auth] response diagnostic', {
+      path,
       status: responseStatus,
-      keys: Object.keys(payload),
+      responseKeys: Object.keys(payload),
       userKeys: Object.keys(profile),
+      ...(reason ? { reason } : {}),
     });
   };
 
@@ -1124,12 +1126,13 @@ function AuthPage() {
       const endpoint = mode === 'register' ? '/auth/register' : '/auth/login';
       const payload = mode === 'register' ? form : { email: form.email, password: form.password };
       const response = await API.post(endpoint, payload);
-      logAuthResponseShape(response.status, response.data);
+      const responseIssue = getAuthResponseIssue(response.data);
+      logAuthResponseShape(endpoint, response.status, response.data, responseIssue);
       const auth = readAuthResponse(response.data);
       if (!auth) {
         localStorage.removeItem('safesphere-token');
         setUser(null);
-        setStatus('The authentication service returned an incomplete response. Confirm the frontend API URL and that the deployed backend is up to date.');
+        setStatus(`The authentication service returned an incomplete response (${responseIssue}). Confirm the frontend API URL and that the deployed backend is up to date.`);
         return;
       }
       localStorage.setItem('safesphere-token', auth.token);
@@ -1137,7 +1140,11 @@ function AuthPage() {
       setStatus(`Signed in as ${auth.user.name}.`);
     } catch (error) {
       if (error.response) {
-        logAuthResponseShape(error.response.status, error.response.data);
+        logAuthResponseShape(
+          mode === 'register' ? '/auth/register' : '/auth/login',
+          error.response.status,
+          error.response.data,
+        );
       }
       setStatus(error.response?.data?.message || 'Unable to sign in. Check your details and connection.');
     }

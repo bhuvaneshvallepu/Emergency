@@ -1,8 +1,8 @@
 import axios from 'axios';
+import { resolveApiBaseUrl } from './apiConfig.js';
 
-const configuredApiBaseUrl = import.meta.env.VITE_API_BASE_URL?.trim();
 export const API = axios.create({
-  baseURL: configuredApiBaseUrl || '/api/v1',
+  baseURL: resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL, import.meta.env.PROD),
 });
 
 export function getAuthHeader() {
