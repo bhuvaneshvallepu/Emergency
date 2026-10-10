@@ -5,7 +5,7 @@ import { validateTwilioRequest } from '../services/smsProvider.js';
 const router = express.Router();
 
 router.post('/twilio/sms-status', async (req, res) => {
-  const callbackUrl = process.env.SMS_STATUS_CALLBACK_URL;
+  const callbackUrl = process.env.SMS_STATUS_CALLBACK_URL?.trim();
   const signature = req.get('X-Twilio-Signature');
   if (!callbackUrl || !signature || !req.body || typeof req.body !== 'object') {
     return res.status(403).json({ message: 'Invalid callback signature.' });

@@ -18,6 +18,7 @@ import {
   Users,
 } from 'lucide-react';
 import { useGeolocation } from './hooks/useGeolocation.js';
+import { describeAlertStatus } from './utils/alertStatus.js';
 import 'leaflet/dist/leaflet.css';
 
 const ServiceMap = lazy(() => import('./components/ServiceMap.jsx'));
@@ -43,6 +44,7 @@ function HomePage() {
   const [services, setServices] = useState([]);
   const [serviceStatus, setServiceStatus] = useState('Loading nearby services...');
   const [sosNotifications, setSosNotifications] = useState([]);
+  const [alertRefreshMessage, setAlertRefreshMessage] = useState('');
   const [sosStatus, setSosStatus] = useState('');
   const [sosState, setSosState] = useState('idle');
   const sosIdempotencyKey = useRef(crypto.randomUUID());
@@ -69,9 +71,41 @@ function HomePage() {
     return () => controller.abort();
   }, [location.latitude, location.longitude]);
 
+  useEffect(() => {
+    if (!incident?.id) return undefined;
+    let active = true;
+    const controller = new AbortController();
+    const terminalStatuses = new Set(['delivered', 'undelivered', 'failed', 'disabled', 'configuration_error', 'skipped']);
+    let refreshTimer;
+    const refreshAlerts = async () => {
+      try {
+        const data = await fetchJson(`/incidents/${incident.id}/alerts`, { signal: controller.signal });
+        if (!active) return;
+        const alerts = data.alerts || [];
+        setSosNotifications(alerts);
+        setAlertRefreshMessage('');
+        if (alerts.length && alerts.every((alert) => terminalStatuses.has(alert.status))) {
+          window.clearInterval(refreshTimer);
+        }
+      } catch {
+        if (active && !controller.signal.aborted) {
+          setAlertRefreshMessage('The latest contact notification status could not be refreshed. Check Incident status for updates.');
+        }
+      }
+    };
+    void refreshAlerts();
+    refreshTimer = window.setInterval(refreshAlerts, 15000);
+    return () => {
+      active = false;
+      controller.abort();
+      window.clearInterval(refreshTimer);
+    };
+  }, [incident?.id]);
+
   const sendSos = async () => {
     if (sosState === 'sending') return;
     setSosState('sending');
+    setAlertRefreshMessage('');
     setSosStatus('Creating your incident. Waiting for server confirmation…');
     try {
       const payload = {
@@ -189,17 +223,23 @@ function HomePage() {
           Starts an incident immediately. GPS or manually entered coordinates are included only when available.
         </p>
         {sosStatus ? (
-          <p role={sosState === 'error' ? 'alert' : 'status'} aria-live="polite" className={`mt-3 rounded-xl p-3 text-sm ${sosState === 'error' ? 'bg-amber-50 text-amber-900' : sosState === 'created' ? 'bg-emerald-50 text-emerald-900' : 'bg-sky-50 text-sky-900'}`}>
+          <div role={sosState === 'error' ? 'alert' : 'status'} aria-live="polite" className={`mt-3 rounded-xl p-3 text-sm ${sosState === 'error' ? 'bg-amber-50 text-amber-900' : sosState === 'created' ? 'bg-emerald-50 text-emerald-900' : 'bg-sky-50 text-sky-900'}`}>
             {sosStatus}
             {incident ? <span className="mt-1 block font-semibold">Incident {incident.id} · {incident.category}</span> : null}
             {sosNotifications.length ? (
               <ul className="mt-2 space-y-1">
-                {sosNotifications.map((notification) => (
-                  <li key={notification.id}>Contact alert: {notification.status}{notification.failureReason ? ` — ${notification.failureReason}` : ''}</li>
-                ))}
+                {sosNotifications.map((notification) => {
+                  const status = describeAlertStatus(notification.status);
+                  return (
+                    <li key={notification.id}>
+                      Contact alert: {status.label} — {notification.failureReason || status.description}
+                    </li>
+                  );
+                })}
               </ul>
             ) : null}
-          </p>
+            {alertRefreshMessage ? <span className="mt-2 block">{alertRefreshMessage}</span> : null}
+          </div>
         ) : null}
 
         <div className="mt-5">
@@ -425,20 +465,24 @@ function CopilotPage() {
   const [messages, setMessages] = useState([
     { role: 'assistant', content: 'I can offer calm, general guidance. This is not a diagnosis and does not contact emergency services.' },
   ]);
-  const [incident, setIncident] = useState(null);
+  const [incidents, setIncidents] = useState([]);
+  const [selectedIncidentId, setSelectedIncidentId] = useState('');
   const [incidentContextUnavailable, setIncidentContextUnavailable] = useState(false);
   const [sending, setSending] = useState(false);
+  const incident = incidents.find((item) => item.id === selectedIncidentId) || null;
 
   useEffect(() => {
     const controller = new AbortController();
     fetchJson('/incidents', { signal: controller.signal })
       .then((data) => {
-        setIncident(data.incidents?.[0] || null);
+        setIncidents(data.incidents || []);
+        setSelectedIncidentId(data.incidents?.[0]?.id || '');
         setIncidentContextUnavailable(false);
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setIncident(null);
+          setIncidents([]);
+          setSelectedIncidentId('');
           setIncidentContextUnavailable(true);
         }
       });
@@ -454,10 +498,30 @@ function CopilotPage() {
     setSending(true);
 
     try {
-      const response = await API.post('/copilot/chat', { message }, { headers: getAuthHeader() });
+      const response = await API.post('/copilot/chat', {
+        message,
+        ...(incident ? { incidentId: incident.id } : {}),
+      }, { headers: getAuthHeader() });
       setMessages((prev) => [...prev, { role: 'assistant', content: response.data.response }]);
     } catch {
       setMessages((prev) => [...prev, { role: 'assistant', content: 'The assistant is temporarily unavailable. Contact emergency services if this is urgent.' }]);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const prepareSummary = async () => {
+    if (!incident || sending) return;
+    setSending(true);
+    try {
+      const response = await API.post('/copilot/summary', { incidentId: incident.id }, { headers: getAuthHeader() });
+      const summary = response.data.summary;
+      setMessages((previous) => [...previous, {
+        role: 'assistant',
+        content: `Emergency summary — ${summary.incidentCategory}: ${summary.userReportedDescription} Recommended next action: ${summary.recommendedNextAction}`,
+      }]);
+    } catch {
+      setMessages((previous) => [...previous, { role: 'assistant', content: 'The incident summary could not be prepared. Contact emergency services directly if this is urgent.' }]);
     } finally {
       setSending(false);
     }
@@ -470,6 +534,14 @@ function CopilotPage() {
           <Bot aria-hidden="true" className="h-5 w-5 text-sky-700" />
           <h2 className="text-xl font-bold text-slate-900">Incident context</h2>
         </div>
+        {incidents.length > 1 ? (
+          <label className="mb-4 block text-sm font-medium text-slate-800">
+            Selected incident
+            <select value={selectedIncidentId} onChange={(event) => setSelectedIncidentId(event.target.value)} className="mt-1 min-h-12 w-full rounded-xl border border-slate-300 bg-white px-3 text-base">
+              {incidents.map((item) => <option key={item.id} value={item.id}>{item.category} · {new Date(item.createdAt).toLocaleString()}</option>)}
+            </select>
+          </label>
+        ) : null}
         {incident ? (
           <div className="space-y-3 text-sm text-slate-700">
             <p><span className="font-semibold">Status:</span> {incident.status}</p>
@@ -497,7 +569,7 @@ function CopilotPage() {
           {sending ? <p role="status" className="self-start rounded-xl bg-white px-3 py-2 text-sm text-slate-600">Preparing guidance…</p> : null}
         </div>
         <div className="mt-3 flex flex-wrap gap-2">
-          <button type="button" disabled={sending} onClick={() => sendMessage('Prepare a concise summary of the current incident for emergency responders.')} className="min-h-11 rounded-full border border-slate-300 px-3 text-sm font-medium text-slate-800 disabled:opacity-60">Prepare emergency summary</button>
+          <button type="button" disabled={sending || !incident} onClick={prepareSummary} className="min-h-11 rounded-full border border-slate-300 px-3 text-sm font-medium text-slate-800 disabled:opacity-60">Prepare emergency summary</button>
         </div>
         <form
           onSubmit={(event) => { event.preventDefault(); sendMessage(); }}
@@ -682,13 +754,16 @@ function IncidentStatusPage() {
             {alertStatusMessage ? <p role="status" className="mt-2 text-sm text-slate-700">{alertStatusMessage}</p> : null}
             {currentAlerts.length ? (
               <ul className="mt-3 space-y-2">
-                {currentAlerts.map((alert) => (
-                  <li key={alert.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
-                    <p className="font-semibold text-slate-900">{alert.channel?.toUpperCase() || 'ALERT'}: {alert.status}</p>
-                    {alert.failureReason ? <p className="mt-1 text-slate-700">{alert.failureReason}</p> : null}
-                    {alert.updatedAt ? <p className="mt-1 text-xs text-slate-700">Updated {new Date(alert.updatedAt).toLocaleString()}</p> : null}
-                  </li>
-                ))}
+                {currentAlerts.map((alert) => {
+                  const status = describeAlertStatus(alert.status);
+                  return (
+                    <li key={alert.id} className="rounded-xl border border-slate-200 bg-slate-50 p-3 text-sm">
+                      <p className="font-semibold text-slate-900">{alert.channel?.toUpperCase() || 'ALERT'}: {status.label}</p>
+                      <p className="mt-1 text-slate-700">{alert.failureReason || status.description}</p>
+                      {alert.updatedAt ? <p className="mt-1 text-xs text-slate-700">Updated {new Date(alert.updatedAt).toLocaleString()}</p> : null}
+                    </li>
+                  );
+                })}
               </ul>
             ) : <p className="mt-2 text-sm text-slate-700">No contact notification status is available yet.</p>}
           </div>
@@ -834,8 +909,18 @@ function ContactsPage() {
             <input required maxLength="100" autoComplete="name" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} className="mt-1 min-h-12 w-full rounded-2xl border border-slate-300 bg-slate-50 px-3 text-base" />
           </label>
           <label className="block text-sm font-medium text-slate-800">
-            Phone
-            <input required type="tel" autoComplete="tel" value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} className="mt-1 min-h-12 w-full rounded-2xl border border-slate-300 bg-slate-50 px-3 text-base" />
+            Phone (international E.164 format)
+            <input
+              required
+              type="tel"
+              autoComplete="tel"
+              pattern={form.notificationPreference === 'sms' ? '[+][1-9][0-9]{7,14}' : undefined}
+              title="Use a country code and digits, for example +14155552671."
+              placeholder="+14155552671"
+              value={form.phone}
+              onChange={(event) => setForm({ ...form, phone: event.target.value })}
+              className="mt-1 min-h-12 w-full rounded-2xl border border-slate-300 bg-slate-50 px-3 text-base"
+            />
           </label>
           <label className="block text-sm font-medium text-slate-800">
             Email (optional)

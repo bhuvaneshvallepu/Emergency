@@ -82,7 +82,7 @@ export async function chatWithCopilot(message, context = {}) {
   const apiKey = process.env.OPENAI_API_KEY;
 
   if (!apiKey) {
-    const answer = `I can help with immediate guidance. Based on the current incident, stay calm, move to a safe area if possible, contact emergency services, and share your location with a trusted contact.`;
+    const answer = `I can help with immediate guidance. Based on what you have shared, stay calm, move to a safe area if possible, contact emergency services, and share your location with a trusted contact.`;
     return copilotSchema.parse({ answer });
   }
 

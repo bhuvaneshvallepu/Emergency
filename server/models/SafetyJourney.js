@@ -9,4 +9,6 @@ const safetyJourneySchema = new mongoose.Schema({
   trustedContactId: { type: mongoose.Schema.Types.ObjectId, ref: 'TrustedContact' },
 }, { timestamps: true });
 
+safetyJourneySchema.index({ userId: 1, status: 1, createdAt: -1 });
+
 export default mongoose.models.SafetyJourney || mongoose.model('SafetyJourney', safetyJourneySchema);

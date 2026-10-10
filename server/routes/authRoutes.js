@@ -1,8 +1,10 @@
 import express from 'express';
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
+import mongoose from 'mongoose';
 import User from '../models/User.js';
 import { demoStore } from '../data/store.js';
+import { isDemoMode, handlePersistenceError } from '../config/persistence.js';
 
 const router = express.Router();
 
@@ -17,7 +19,9 @@ function signToken(payload) {
 router.post('/register', async (req, res) => {
   const { name, email, password } = req.body || {};
 
-  if (!name || !email || !password) {
+  if (typeof name !== 'string' || !name.trim()
+    || typeof email !== 'string' || !email.trim()
+    || typeof password !== 'string' || !password) {
     return res.status(400).json({ message: 'Name, email, and password are required.' });
   }
 
@@ -27,7 +31,7 @@ router.post('/register', async (req, res) => {
 
   const normalizedEmail = String(email).trim().toLowerCase();
 
-  if (process.env.DEMO_MODE === 'true') {
+  if (isDemoMode()) {
     const existing = demoStore.user.email === normalizedEmail;
     if (existing) {
       return res.status(409).json({ message: 'User already exists.' });
@@ -36,13 +40,14 @@ router.post('/register', async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
     demoStore.user = {
       ...demoStore.user,
-      name,
+      name: name.trim(),
       email: normalizedEmail,
       passwordHash,
     };
 
     const token = signToken({ id: demoStore.user.id, email: demoStore.user.email, name: demoStore.user.name });
-    return res.status(201).json({ token, user: { ...demoStore.user, passwordHash: undefined } });
+    const { passwordHash: _passwordHash, ...publicUser } = demoStore.user;
+    return res.status(201).json({ token, user: publicUser });
   }
 
   try {
@@ -53,29 +58,30 @@ router.post('/register', async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 10);
     const user = await User.create({
-      name,
+      name: name.trim(),
       email: normalizedEmail,
       passwordHash,
       preferredLanguage: 'en',
     });
 
     const token = signToken({ id: user._id.toString(), email: user.email, name: user.name });
-    return res.status(201).json({ token, user: { id: user._id, name: user.name, email: user.email } });
+    return res.status(201).json({ token, user: { id: user._id.toString(), name: user.name, email: user.email } });
   } catch (error) {
-    return res.status(500).json({ message: 'Registration failed.' });
+    if (error?.code === 11000) return res.status(409).json({ message: 'User already exists.' });
+    return handlePersistenceError(res, error, 'Registration');
   }
 });
 
 router.post('/login', async (req, res) => {
   const { email, password } = req.body || {};
 
-  if (!email || !password) {
+  if (typeof email !== 'string' || !email.trim() || typeof password !== 'string' || !password) {
     return res.status(400).json({ message: 'Email and password are required.' });
   }
 
   const normalizedEmail = String(email).trim().toLowerCase();
 
-  if (process.env.DEMO_MODE === 'true') {
+  if (isDemoMode()) {
     const demoUser = demoStore.user;
     const matches = demoUser.email === normalizedEmail && (await bcrypt.compare(password, demoUser.passwordHash || '$2a$10$M8Ox3Q1C2T9E7m0sNKg2Cu7K1kQ6c0d8.8uPzM1QOhk72F6HhH7xO'));
     if (!matches) {
@@ -87,7 +93,7 @@ router.post('/login', async (req, res) => {
   }
 
   try {
-    const user = await User.findOne({ email: normalizedEmail });
+    const user = await User.findOne({ email: normalizedEmail }).select('+passwordHash');
     if (!user) {
       return res.status(401).json({ message: 'Invalid credentials.' });
     }
@@ -98,9 +104,9 @@ router.post('/login', async (req, res) => {
     }
 
     const token = signToken({ id: user._id.toString(), email: user.email, name: user.name });
-    return res.json({ token, user: { id: user._id, name: user.name, email: user.email } });
+    return res.json({ token, user: { id: user._id.toString(), name: user.name, email: user.email } });
   } catch (error) {
-    return res.status(500).json({ message: 'Login failed.' });
+    return handlePersistenceError(res, error, 'Login');
   }
 });
 
@@ -112,8 +118,9 @@ router.get('/me', async (req, res) => {
   const authHeader = req.headers.authorization || '';
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
 
-  if (process.env.DEMO_MODE === 'true' && token === 'demo-token') {
-    return res.json({ user: { ...demoStore.user, passwordHash: undefined } });
+  if (isDemoMode() && token === 'demo-token') {
+    const { passwordHash: _passwordHash, ...publicUser } = demoStore.user;
+    return res.json({ user: publicUser });
   }
 
   if (!token) {
@@ -134,7 +141,13 @@ router.get('/me', async (req, res) => {
 
     return res.json({ user: { id: user._id, name: user.name, email: user.email } });
   } catch (error) {
-    return res.status(401).json({ message: 'Invalid or expired token.' });
+    if (error instanceof mongoose.Error.CastError) {
+      return res.status(401).json({ message: 'Invalid or expired token.' });
+    }
+    if (error.name === 'JsonWebTokenError' || error.name === 'TokenExpiredError') {
+      return res.status(401).json({ message: 'Invalid or expired token.' });
+    }
+    return handlePersistenceError(res, error, 'User lookup');
   }
 });
 

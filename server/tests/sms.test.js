@@ -71,27 +71,59 @@ function configureSmsEnvironment({ enabled = true } = {}) {
 }
 
 test('SMS is disabled unless both provider and enable flag are set', async () => {
-  delete process.env.SMS_PROVIDER;
-  delete process.env.SMS_ENABLED;
+  configureSmsEnvironment({ enabled: false });
   assert.equal(isSmsEnabled(), false);
   const result = await sendSms({ to: '+14155552671', body: 'Emergency alert.' });
   assert.equal(result.status, 'disabled');
   assert.equal(result.sid, null);
+
+  const incident = { id: `sms-disabled-${randomUUID()}`, userId: demoStore.user.id, description: 'Need help', location: {} };
+  const contact = testContact();
+  const alert = await createAlertWorkflow(incident, contact);
+  assert.equal(alert.status, 'disabled');
+  assert.match(alert.failureReason, /SMS_ENABLED/i);
+  assert.equal(demoStore.alertEvents.includes(alert), true);
+  demoStore.alertEvents = demoStore.alertEvents.filter((item) => item.id !== alert.id);
+  demoStore.timeline = demoStore.timeline.filter((item) => item.incidentId !== incident.id);
 });
 
-test('enabled SMS fails safely when Twilio credentials are missing', async () => {
+test('enabled SMS identifies each missing required Twilio setting', async () => {
+  for (const setting of ['SMS_ACCOUNT_ID', 'SMS_AUTH_TOKEN', 'SMS_FROM_NUMBER']) {
+    configureSmsEnvironment();
+    delete process.env[setting];
+    await assert.rejects(
+      () => sendSms({ to: '+14155552671', body: 'Emergency alert.' }),
+      (error) => error.code === 'SMS_CONFIGURATION_ERROR'
+        && error.message.includes(setting)
+        && !error.message.includes('test-auth-token'),
+    );
+  }
+});
+
+test('enabled SMS reports missing Twilio settings as a configuration error before dispatch', async () => {
   configureSmsEnvironment();
   delete process.env.SMS_ACCOUNT_ID;
-  await assert.rejects(
-    () => sendSms({ to: '+14155552671', body: 'Emergency alert.' }),
-    (error) => error.code === 'SMS_CONFIGURATION_ERROR' && !error.message.includes('test-auth-token'),
-  );
+  const incident = { id: `sms-config-${randomUUID()}`, userId: demoStore.user.id, description: 'Need help', location: {} };
+  const contact = testContact();
+  const alert = await createAlertWorkflow(incident, contact);
+  assert.equal(alert.status, 'configuration_error');
+  assert.match(alert.failureReason, /SMS_ACCOUNT_ID/);
+  assert.equal(alert.provider, 'twilio');
+  demoStore.alertEvents = demoStore.alertEvents.filter((item) => item.id !== alert.id);
+  demoStore.timeline = demoStore.timeline.filter((item) => item.incidentId !== incident.id);
 });
 
 test('SMS rejects invalid phone numbers and empty or oversized bodies', async () => {
   configureSmsEnvironment();
   await assert.rejects(() => sendSms({ to: '4155552671', body: 'Emergency alert.' }), { code: 'INVALID_RECIPIENT' });
   await assert.rejects(() => sendSms({ to: '+14155552671', body: ' ' }), { code: 'INVALID_MESSAGE' });
+
+  const incident = { id: `sms-invalid-${randomUUID()}`, userId: demoStore.user.id, description: 'Need help', location: {} };
+  const alert = await createAlertWorkflow(incident, testContact({ phone: '4155552671' }));
+  assert.equal(alert.status, 'failed');
+  assert.equal(alert.failureCode, 'INVALID_RECIPIENT');
+  demoStore.alertEvents = demoStore.alertEvents.filter((item) => item.id !== alert.id);
+  demoStore.timeline = demoStore.timeline.filter((item) => item.incidentId !== incident.id);
 });
 
 test('valid opted-in contact invokes the Twilio client without exposing its auth token', async () => {
@@ -137,7 +169,6 @@ test('contacts require E.164 for SMS and record consent as false by default', as
 });
 
 test('contact without SMS consent is skipped and never reaches the provider', async () => {
-  const contact = testContact({ smsConsent: false });
   const incident = { id: `sms-test-incident-${randomUUID()}`, userId: demoStore.user.id, description: 'Need help', location: {} };
   configureSmsEnvironment();
   let invoked = false;
@@ -146,14 +177,38 @@ test('contact without SMS consent is skipped and never reaches the provider', as
     return { messages: { create: async () => ({ sid: 'SMnot-sent', status: 'queued' }) } };
   });
   try {
-    const alert = createAlertWorkflow(incident, contact);
-    assert.equal(alert.status, 'skipped');
-    assert.match(alert.failureReason, /not consented/i);
+    const alerts = await Promise.all([false, 'true'].map((smsConsent) => createAlertWorkflow(
+      incident,
+      testContact({ smsConsent }),
+    )));
+    assert.deepEqual(alerts.map((alert) => alert.status), ['skipped', 'skipped']);
+    assert.ok(alerts.every((alert) => /not consented/i.test(alert.failureReason)));
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(invoked, false);
   } finally {
     resetSmsClientFactory();
     demoStore.alertEvents = demoStore.alertEvents.filter((item) => item.incidentId !== incident.id);
+    demoStore.timeline = demoStore.timeline.filter((item) => item.incidentId !== incident.id);
+  }
+});
+
+test('an API response alone never marks an alert delivered', async () => {
+  configureSmsEnvironment();
+  const incident = { id: `sms-initial-delivery-${randomUUID()}`, userId: demoStore.user.id, description: 'Need help', location: {} };
+  const contact = testContact();
+  setSmsClientFactory(() => ({
+    messages: { create: async () => ({ sid: 'SMinitial-status-test', status: 'delivered' }) },
+  }));
+  try {
+    const alert = await createAlertWorkflow(incident, contact);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(alert.status, 'sent');
+    assert.equal(alert.deliveredAt, null);
+    assert.equal(alert.providerMessageId, 'SMinitial-status-test');
+  } finally {
+    resetSmsClientFactory();
+    demoStore.alertEvents = demoStore.alertEvents.filter((item) => item.incidentId !== incident.id);
+    demoStore.timeline = demoStore.timeline.filter((item) => item.incidentId !== incident.id);
   }
 });
 
@@ -168,7 +223,7 @@ test('one provider failure does not block other recipients or incident creation'
     messages: {
       create: async ({ to }) => {
         attempted.push(to);
-        if (to === first.phone) throw Object.assign(new Error('provider unavailable'), { code: 'E_TEST' });
+        if (to === first.phone) throw Object.assign(new Error('provider unavailable'), { code: 21211 });
         return { sid: 'SM' + randomUUID().replaceAll('-', '').slice(0, 32), status: 'queued' };
       },
     },
@@ -194,6 +249,8 @@ test('one provider failure does not block other recipients or incident creation'
       await new Promise((resolve) => setTimeout(resolve, 80));
       const alerts = await getIncidentAlerts(payload.incident.id, demoStore.user.id);
       assert.equal(alerts.find((item) => item.contactId === first.id).status, 'failed');
+      assert.equal(alerts.find((item) => item.contactId === first.id).failureCode, '21211');
+      assert.equal(alerts.find((item) => item.contactId === first.id).failureReason.includes('provider unavailable'), false);
       assert.equal(alerts.find((item) => item.contactId === second.id).status, 'queued');
       assert.deepEqual(attempted.sort(), [first.phone, second.phone].sort());
       assert.equal(demoStore.incidents.length, originalIncidentCount + 1);
@@ -234,6 +291,9 @@ test('SOS works without GPS and does not send a fake map location', async () => 
       assert.equal(payload.incident.location.latitude, null);
       assert.equal(payload.incident.location.longitude, null);
       await new Promise((resolve) => setTimeout(resolve, 50));
+      const alerts = await getIncidentAlerts(incidentId, demoStore.user.id);
+      assert.equal(alerts.find((item) => item.contactId === contact.id).status, 'queued');
+      assert.equal(alerts.find((item) => item.contactId === contact.id).providerMessageId, 'SMno-location-test');
       assert.match(sentBody, /has requested help/);
       assert.equal(sentBody.includes('maps.google.com'), false);
     });

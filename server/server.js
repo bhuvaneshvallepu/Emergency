@@ -8,9 +8,12 @@ import { fileURLToPath } from 'node:url';
 import rateLimit from 'express-rate-limit';
 import { Server } from 'socket.io';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import { connectDb } from './config/db.js';
+import Incident from './models/Incident.js';
 import { demoStore } from './data/store.js';
+import { databaseUnavailable, isDemoMode, isObjectId } from './config/persistence.js';
 import authRoutes from './routes/authRoutes.js';
 import contactsRoutes from './routes/contactsRoutes.js';
 import incidentsRoutes from './routes/incidentsRoutes.js';
@@ -19,12 +22,20 @@ import copilotRoutes from './routes/copilotRoutes.js';
 import journeysRoutes from './routes/journeysRoutes.js';
 import smsWebhookRoutes from './routes/smsWebhookRoutes.js';
 import { setSocketServer } from './services/notificationService.js';
+import { getSmsConfigurationStatus } from './services/smsProvider.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, '..');
 
 dotenv.config({ path: path.resolve(rootDir, '.env') });
+
+const smsConfiguration = getSmsConfigurationStatus();
+console.info(`SMS provider configured: ${smsConfiguration.providerConfigured}`);
+console.info(`SMS enabled: ${smsConfiguration.smsEnabled}`);
+console.info(`Account SID configured: ${smsConfiguration.accountSidConfigured}`);
+console.info(`Auth token configured: ${smsConfiguration.authTokenConfigured}`);
+console.info(`Sender number configured: ${smsConfiguration.senderNumberConfigured}`);
 
 if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
   throw new Error('JWT_SECRET must be set to a strong value in production.');
@@ -48,10 +59,13 @@ function getSocketToken(socket) {
   return null;
 }
 
-function canAccessIncident(user, incidentId) {
+async function canAccessIncident(user, incidentId) {
   if (!user || !incidentId) return false;
-  const incident = demoStore.incidents.find((item) => item.id === incidentId);
-  return Boolean(incident && incident.userId === user.id);
+  if (isDemoMode()) {
+    return demoStore.incidents.some((item) => item.id === incidentId && item.userId === user.id);
+  }
+  if (!isObjectId(incidentId)) return false;
+  return Boolean(await Incident.exists({ _id: incidentId, userId: user.id }));
 }
 
 app.use(helmet());
@@ -69,7 +83,10 @@ app.use(
 );
 
 app.get('/api/v1/health', (_req, res) => {
-  res.json({ status: 'ok', service: 'SafeSphere AI', mode: process.env.MONGODB_URI ? 'database' : 'demo' });
+  const demoMode = isDemoMode();
+  const databaseReady = mongoose.connection.readyState === 1;
+  if (!demoMode && !databaseReady) return databaseUnavailable(res);
+  return res.json({ status: 'ok', service: 'SafeSphere AI', mode: demoMode ? 'demo' : 'database' });
 });
 
 app.use('/api/v1/auth', authRoutes);
@@ -95,7 +112,7 @@ io.on('connection', (socket) => {
   }
 
   try {
-    if (process.env.DEMO_MODE === 'true' && token === 'demo-token') {
+    if (isDemoMode() && token === 'demo-token') {
       socket.data.user = demoStore.user;
     } else {
       const jwtSecret = process.env.JWT_SECRET;
@@ -112,14 +129,18 @@ io.on('connection', (socket) => {
 
   socket.emit('system', { type: 'connected', message: 'Connected to SafeSphere AI live updates.' });
 
-  socket.on('join-incident', (incidentId) => {
-    if (typeof incidentId !== 'string' || !canAccessIncident(socket.data.user, incidentId)) {
+  socket.on('join-incident', async (incidentId) => {
+    try {
+      if (typeof incidentId !== 'string' || !await canAccessIncident(socket.data.user, incidentId)) {
+        socket.emit('error', { type: 'unauthorized_room', message: 'You do not have access to that incident.' });
+        return;
+      }
+      socket.join(`incident-${incidentId}`);
+      socket.emit('incident-room-joined', { incidentId });
+    } catch (error) {
+      console.error('Socket incident access check failed:', error.name || 'database_error');
       socket.emit('error', { type: 'unauthorized_room', message: 'You do not have access to that incident.' });
-      return;
     }
-
-    socket.join(`incident-${incidentId}`);
-    socket.emit('incident-room-joined', { incidentId });
   });
 
   socket.on('leave-incident', (incidentId) => {
